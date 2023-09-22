@@ -9,23 +9,37 @@ https://github.com/AUTOMATIC1111/stable-diffusion-webui/discussions/12083
 
 By Tim (drmn4ea at google's mail)
 
+Requirements:
+StableDiffusion WebUi (https://github.com/AUTOMATIC1111/stable-diffusion-webui)
+Python-opencv (cv2)
+NumPy
+
 '''
 import json
 import base64
 import requests
 import os
-
+import os.path
+import errno
 import sys
 import cv2
 import numpy as np
-from tqdm import tqdm
+#from tqdm import tqdm
 import time
 
+#########   User Configurable Settings #################
+
 stdip = 'http://127.0.0.1:7860' # Default running on localhost
-image_output_path = 'D:/stablediffusion/hallo/output' # Output directory for before/after images; leave blank to skip saving images
+image_output_path = './output' # Output directory for before/after images; leave as None to skip saving images. Use forward slash for path separator (even Windoze)
+timeout_sec = 10 # Timeout when waiting for StableDiffusion results
+display_time = 2.5 # Duration in seconds to display the result
+img_height = 512 # Image width for SD output; most models are trained on 512x512 or 512x768 and may produce odd results at other sizes
+img_width = 768 # You can tweak the aspect ratio to better match your display if needed, or just cover any letterbox bars with black paper :-)
+
+#########   User Configurable Settings #################
 
 def submit_post(url: str, data: dict):
-    return requests.post(url, data=json.dumps(data), timeout=10)
+    return requests.post(url, data=json.dumps(data), timeout=timeout_sec)
 
 def image_to_base64(image):
     encoded_string = base64.b64encode(image)
@@ -35,6 +49,16 @@ def image_to_base64(image):
 def save_image(decoded_image, output_path):
     print ("Saving, output path: %s, Image payload len: %u" % (output_path, len(decoded_image)))
     # Check if file exists, create if it doesn't exist
+    dirs, fname = output_path.rsplit('/', 1)
+    # Taken from https://stackoverflow.com/a/600612/119527
+    try:
+        os.makedirs(dirs)
+    except OSError as exc:  # Python >2.5
+        if exc.errno == errno.EEXIST and os.path.isdir(dirs):
+            pass
+        else:
+            raise
+
     if not os.path.exists(output_path):
         open(output_path, 'wb').close()
 
@@ -60,6 +84,13 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
     # Window for actual spookification results, fullscreen
     cv2.namedWindow("Spookified",  cv2.WINDOW_NORMAL)
     cv2.setWindowProperty("Spookified", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    # Create a black image frame the same size as the expected SD output.
+    # This will allow for clearing the screen between outputs.
+    # TODO: Fix aspect ratio issues / letterbox bars
+
+    all_black_frame = np.zeros((img_height, img_width, 3))
+    cv2.imshow("Spookified", all_black_frame)
 
     while True:
         ret, image_frame = video_capture.read()
@@ -104,7 +135,7 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
             retval, usable_image_frame = cv2.imencode('.png', image_frame)
 
             # submit the request
-            sd_img = get_sd_image(usable_image_frame)
+            sd_img = get_sd_image(usable_image_frame, img_size=[img_height,img_width])
 
             # TODO: Saving throw (static jumpscare image?) if SD backend times out
 
@@ -121,8 +152,14 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
                 cv_sd_img = cv2.imdecode(cv_sd_img, cv2.IMREAD_UNCHANGED) # convert to raw in BGR color order for display by OpenCV
                 #
                 cv2.imshow("Spookified", cv_sd_img)
-                time.sleep(displaytime)
 
+                # Delay to show the result
+                # Press q to quit (may take a few seconds)
+                if cv2.waitKey(int(displaytime*1000)) & 0xFF == ord('q'):
+                    break
+
+                # Restore black screen
+                cv2.imshow("Spookified", all_black_frame)
                 # TODO: Restore lighting to normal
 
         # Press q to quit (may take a few seconds)
@@ -133,7 +170,7 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
     cv2.destroyAllWindows()
     return num_faces
 
-def get_sd_image(orig_image, file_name = None):
+def get_sd_image(orig_image, img_size=[512, 768]):
     '''Given a source image buffer in a compatible format (.png/.jpg/etc.), call StableDiffusion backend using the parameters specified below
     and return the resulting image.
     '''
@@ -163,12 +200,11 @@ def get_sd_image(orig_image, file_name = None):
             "steps": 9,
             # Number of steps, more is generally better but slower (adjust for quality vs. response time tradeoff). Max 150 in webui, maybe can go higher here?
             "cfg_scale": 12,  # Influence of prompt text on image, usually 5-15, max 30 in webui, can fine tune
-            "width": 768,  # Width
-            "height": 512,  # Height
+            "width": img_size[1],  # Width
+            "height": img_size[0],  # Height
             # Most models are trained on 512x512 and 512x768 images, so target one of those sizes for best results. See resize_mode below for how the incoming image is massaged to this size.
             "restore_faces": False,
             # Whether to correct faces. This adds a speed and GPU RAM penalty, and again, uncanny faces are kind of what we want, so leaving this off.
-            "tiling": False,  # Tiling, meaning left and right edges match, top and bottom match. Usually False
             "script_args": [],  # Parameters I haven't tried, keep this empty list
             "sampler_index": "DPM++ 2M Karras",
             # Sampling method, recommend DPM++ 2M Karras, good quality and fast. Can fine tune
@@ -204,7 +240,7 @@ if __name__ == "__main__":
         video_mode= 0
     else:
         video_mode = sys.argv[1]
-    webcam_face_detect(video_mode)
+    webcam_face_detect(video_mode, displaytime=display_time)
 
 
 
