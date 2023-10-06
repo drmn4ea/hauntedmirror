@@ -24,12 +24,14 @@ import errno
 import sys
 import cv2
 import numpy as np
+import serial
 #from tqdm import tqdm
 import time
 
 #########   User Configurable Settings #################
 
 stdip = 'http://127.0.0.1:7860' # Default running on localhost
+lighting_com_port = 'COM4' # Default com port for lighting control, or None if not used (ex: 'COM1', '/dev/ttyACM0', etc.)
 image_output_path = './output' # Output directory for before/after images; leave as None to skip saving images. Use forward slash for path separator (even Windoze)
 timeout_sec = 10 # Timeout when waiting for StableDiffusion results
 display_time = 2.5 # Duration in seconds to display the result
@@ -89,7 +91,7 @@ def crop_cv_img(img, xmin, xmax, ymin, ymax):
     return ret
 
 
-def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_frontalface_default.xml"):
+def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_frontalface_default.xml", comport=None):
 
     face_cascade = cv2.CascadeClassifier(cascasdepath)
 
@@ -110,6 +112,10 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
 
     all_black_frame = np.zeros((img_height, img_width, 3))
     cv2.imshow("Spookified", all_black_frame)
+
+    # Set up initial lighting state, if used
+    if comport:
+        comport.write(b'L') # Lit
 
     while True:
         ret, image_frame = video_capture.read()
@@ -151,10 +157,12 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
         # If face(s) detected (someone's at the mirror), kick this frame off to StableDiffusion and grab the result.
         # This is simple and just blocks until the result is ready.
         if num_faces > 0:
-            # TODO: Start lighting effect here (flicker the user-facing / vanity light source).
+            # Start lighting flicker effect here.
             # Generating the SD image takes a bit, so the idea of this is to visually show something is happening,
             # keep the viewer's eye drawn toward the mirror until the result is ready, and finally dim the lights
             # to help the display image show through. Plus, no haunting is complete without flickery lights.
+            if comport:
+                comport.write(b'F')  # Flicker
 
             # Python OpenCV works with images as NumPy arrays, and in BGR color order.
             # Convert the clean copy of the webcam frame to a memory buffer in a format the StableDiffusion backend can understand.
@@ -171,12 +179,15 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
                     save_image(usable_image_frame, base_filename + '_orig.png')
                     save_image(sd_img, base_filename + '_spooky.png')
 
-                # TODO: Cut/dim the vanity lights for screen display
-
                 # Translate incoming format (.png) back to something CV understands
                 cv_sd_img = np.frombuffer(sd_img, dtype='uint8') # convert to NumPy array of the png
                 cv_sd_img = cv2.imdecode(cv_sd_img, cv2.IMREAD_UNCHANGED) # convert to raw in BGR color order for display by OpenCV
-                #
+
+                # Black out the vanity lighting so the 2-way mirror effect shows through
+                if comport:
+                    comport.write(b'D')  # Dark
+
+                # Update display with spooky image
                 cv2.imshow("Spookified", cv_sd_img)
 
                 # Delay to show the result
@@ -186,7 +197,10 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
 
                 # Restore black screen
                 cv2.imshow("Spookified", all_black_frame)
-                # TODO: Restore lighting to normal
+
+                # Restore lighting to normal
+                if comport:
+                    comport.write(b'L')  # Lit
 
         # Press q to quit (may take a few seconds)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -266,7 +280,11 @@ if __name__ == "__main__":
         video_mode= 0
     else:
         video_mode = sys.argv[1]
-    webcam_face_detect(video_mode, displaytime=display_time)
+    if lighting_com_port is not None:
+        comport = serial.Serial(lighting_com_port, 115200)
+    else:
+        comport = None
+    webcam_face_detect(video_mode, displaytime=display_time, comport=comport)
 
 
 
