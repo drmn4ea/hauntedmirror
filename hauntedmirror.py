@@ -35,6 +35,8 @@ timeout_sec = 10 # Timeout when waiting for StableDiffusion results
 display_time = 2.5 # Duration in seconds to display the result
 img_height = 512 # Image width for SD output; most models are trained on 512x512 or 512x768 and may produce odd results at other sizes
 img_width = 768 # You can tweak the aspect ratio to better match your display if needed, or just cover any letterbox bars with black paper :-)
+img_reverse = True # Undo horizontal mirroring between the webcam and viewer. If image seems reversed (subjects at left left in the mirror are at right on the screen), try disabling this
+vert_comp = 0.0 # 0.0 ~ 1.0. Assuming webcam is mounted at top of screen, 0.5 to crop/shift image up 1/2 screen to more closely match mirror (appear centered).
 
 #########   User Configurable Settings #################
 
@@ -68,6 +70,23 @@ def save_image(decoded_image, output_path):
         f.flush()
         f.close()
 
+def crop_cv_img(img, xmin, xmax, ymin, ymax):
+    ''' Normalized crop (0 to 1) '''
+
+    [myheight, mywidth, colors] = img.shape
+    if xmax<=1 and ymax <= 1:
+        # Normalized crop
+        print (img.shape)
+        print (xmax)
+        xmin = int(xmin * mywidth)
+        ymin = int(ymin * myheight)
+        xmax = int(xmax * mywidth)
+        ymax = int(ymax * myheight)
+        print(xmax, ymax)
+        ret = img[ymin:ymax, xmin:xmax, :]
+        print("Outgoing shape")
+        print (ret.shape)
+    return ret
 
 
 def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_frontalface_default.xml"):
@@ -98,6 +117,13 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath = "haarcascade_
         if not ret:
             print("Failed grabbing image frame")
             break
+
+        if img_reverse:
+            # In the mirror, you're looking forward at you, but the webcam is flipped around 180 and looking back at you,
+            # so the image is mirrored (unless they already correct for this; unlikely).
+            image_frame = cv2.flip(image_frame, 1)
+
+        image_frame = crop_cv_img(image_frame,0,1,vert_comp,1)
 
         # Cascade classifier expects a grayscale image
         gray = cv2.cvtColor(image_frame, cv2.COLOR_BGR2GRAY)
