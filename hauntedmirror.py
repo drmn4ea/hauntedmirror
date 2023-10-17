@@ -31,16 +31,23 @@ import time
 #########   User Configurable Settings #################
 
 stdip = 'http://127.0.0.1:7860' # Default running on localhost
-lighting_com_port = 'COM4' # Default com port for lighting control, or None if not used (ex: 'COM1', '/dev/ttyACM0', etc.)
-image_output_path = './output' # Output directory for before/after images; leave as None to skip saving images. Use forward slash for path separator (even Windoze)
-timeout_sec = 10 # Timeout when waiting for StableDiffusion results
-display_time = 2.5 # Duration in seconds to display the result
+lighting_com_port = 'COM1' # Default com port for lighting control, or None if not used (ex: 'COM1', '/dev/ttyACM0', etc.)
+image_output_path = None # Output directory for before/after images (e.g. './output'); leave as None to skip saving images. Use forward slash for path separator (even Windoze)
 img_height = 512 # Image width for SD output; most models are trained on 512x512 or 512x768 and may produce odd results at other sizes
 img_width = 768 # You can tweak the aspect ratio to better match your display if needed, or just cover any letterbox bars with black paper :-)
 img_reverse = True # Undo horizontal mirroring between the webcam and viewer. If image seems reversed (subjects at left left in the mirror are at right on the screen), try disabling this
 vert_comp = 0.0 # 0.0 ~ 1.0. Assuming webcam is mounted at top of screen, 0.5 to crop/shift image up 1/2 screen to more closely match mirror (appear centered).
+timeout_sec = 10.0 # Timeout when waiting for StableDiffusion results
+frame_grab_delay_sec = 1.5 # Delay between first face detect frame and frame grab; gives a little more time for victim to fully enter the frame
+display_time = 2.5 # Duration in seconds to display the spookified image
 
-#########   User Configurable Settings #################
+# Stable Diffusion key settings, see get_sd_image() below for some minor ones
+sd_denoising_strength = 0.45 # Range 0-1, smaller value closer to original image. 0.45 is a good starting point.
+sd_num_steps = 9 # Number of iterations (speed vs. quality tradeoff, more is better/slower).
+sd_cfg_scale = 12 # Weighting of text prompt (higher=more), rage ~0-30, sweet spot of ~5-15.
+sd_prompt = "spooky scary skeletons" # Text prompt, generic Halloweeny terms seem to work well
+
+#########   End User Configurable Settings #################
 
 def submit_post(url: str, data: dict):
     return requests.post(url, data=json.dumps(data), timeout=timeout_sec)
@@ -157,6 +164,24 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
         # If face(s) detected (someone's at the mirror), kick this frame off to StableDiffusion and grab the result.
         # This is simple and just blocks until the result is ready.
         if num_faces > 0:
+            # Delay a bit and capture a frame for realsies. In my initial testing no delay would catch someone just walking into frame
+            # or turned side-on, this optionally gives a bit more time for them to be in position. Pretty crude, but better than nothing.
+            time.sleep(frame_grab_delay_sec)
+
+            ret, image_frame = video_capture.read()
+
+            if not ret:
+                print("Failed grabbing image frame")
+                break
+
+            if img_reverse:
+                # In the mirror, you're looking forward at you, but the webcam is flipped around 180 and looking back at you,
+                # so the image is mirrored (unless they already correct for this; unlikely).
+                image_frame = cv2.flip(image_frame, 1)
+
+            image_frame = crop_cv_img(image_frame, 0, 1, vert_comp, 1)
+
+
             # Start lighting flicker effect here.
             # Generating the SD image takes a bit, so the idea of this is to visually show something is happening,
             # keep the viewer's eye drawn toward the mirror until the result is ready, and finally dim the lights
@@ -225,10 +250,10 @@ def get_sd_image(orig_image, img_size=[512, 768]):
         # Hit the builtin documentation (e.g. http://127.0.0.1:7860/docs#/default/img2imgapi_sdapi_v1_img2img_post) for a list of recognized parameters
         data = {
             "init_images": [image_to_base64(orig_image)],  # Original image, must be a supported image format (.png, .jpg...) and base64 encoded
-            "denoising_strength": 0.45,
+            "denoising_strength": sd_denoising_strength,
             # Range 0-1, smaller value closer to original image. Larger value more likely to let imagination fly
             # For output recognizably true to the source material, 0.45 seems to be a good starting point.
-            "prompt": "spooky scary skeletons",  # Generic Halloweeny words like creepy, spooky, ghost, skeleton, graveyard, etc. seem to work well.
+            "prompt": sd_prompt,  # Generic Halloweeny words like creepy, spooky, ghost, skeleton, graveyard, etc. seem to work well.
             # We don't know how many subjects will be in frame, their poses, costumes etc., and these models tend to be extensively trained on faces,
             # so being vague tends to work well at modifying faces without messing up other details.
             # Being overly specific tends to produce poorer results.
@@ -237,9 +262,9 @@ def get_sd_image(orig_image, img_size=[512, 768]):
             # "styles": [],
             "seed": -1,
             # Initial seed. I feel images with the same seed are similar but not identical. -1 is random
-            "steps": 9,
+            "steps": sd_num_steps,
             # Number of steps, more is generally better but slower (adjust for quality vs. response time tradeoff). Max 150 in webui, maybe can go higher here?
-            "cfg_scale": 12,  # Influence of prompt text on image, usually 5-15, max 30 in webui, can fine tune
+            "cfg_scale": sd_cfg_scale,  # Influence of prompt text on image, usually 5-15, max 30 in webui, can fine tune
             "width": img_size[1],  # Width
             "height": img_size[0],  # Height
             # Most models are trained on 512x512 and 512x768 images, so target one of those sizes for best results. See resize_mode below for how the incoming image is massaged to this size.
@@ -249,7 +274,7 @@ def get_sd_image(orig_image, img_size=[512, 768]):
             "sampler_index": "DPM++ 2M Karras",
             # Sampling method, recommend DPM++ 2M Karras, good quality and fast. Can fine tune
             "resize_mode": 2,
-            # Resize mode, 0: stretch, 1: crop, 2: pad, 3: scale (upsample latent), recommend crop, don't know which one 1 refers to here, can reselect later
+            # Resize mode, 0: stretch, 1: crop (recommended), 2: pad, 3: scale (upsample latent)
             # "override_settings": {"sd_model_checkpoint": "your_model.safetensors",},
             # "hypernetwork_model": ["dic_demosaicing.pt"],
             # "script_args": [0,True,True,"hypernetwork_model","dic_demosaicing.pt",1,1],
