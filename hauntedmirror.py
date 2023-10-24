@@ -22,6 +22,7 @@ import os
 import os.path
 import errno
 import sys
+import traceback
 import cv2
 import numpy as np
 import serial
@@ -40,6 +41,10 @@ vert_comp = 0.0 # 0.0 ~ 1.0. Assuming webcam is mounted at top of screen, 0.5 to
 timeout_sec = 10.0 # Timeout when waiting for StableDiffusion results
 frame_grab_delay_sec = 1.5 # Delay between first face detect frame and frame grab; gives a little more time for victim to fully enter the frame
 display_time = 2.5 # Duration in seconds to display the spookified image
+# Settings for low-end frontend hardware
+frame_skip_delay = 0.1 # Default delay to catch-up image frames to realtime on resource-constrained hardware (tested with RPi2)
+display_breath_delay = 0.2  # on some platforms, imshow() seems to need some 'breathing time' in the form of a cv2.waitKey(...) with a minimum delay for the image to show/scale properly.
+                            # If this delay is set too low, fullscreen windows do not get scaled properly.
 
 # Stable Diffusion key settings, see get_sd_image() below for some minor ones
 sd_denoising_strength = 0.45 # Range 0-1, smaller value closer to original image. 0.45 is a good starting point.
@@ -97,6 +102,16 @@ def crop_cv_img(img, xmin, xmax, ymin, ymax):
         print (ret.shape)
     return ret
 
+def frame_eating_delay(vidcap, t):
+    '''
+    Delay while consuming image frames.
+    vidcap: OpenCV VideoCapture object
+    t: time to delay, in seconds or fractions thereof
+    '''
+
+    deadline = time.time() + t
+    while time.time() < deadline:
+        vidcap.read() # ignore the result
 
 def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_frontalface_default.xml", comport=None):
 
@@ -120,21 +135,25 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
     all_black_frame = np.zeros((img_height, img_width, 3))
     cv2.imshow("Spookified", all_black_frame)
 
+    # Window and its content (imshow...) seems to be only displayed during a 'waitKey'.
+    # Open some combination of (Linux/X11/resource-limited hardware) OpenCV port seems to require this specific
+    # type of delay (not Python sleep, etc.) in order to properly spawn and scale the window.
+    cv2.waitKey(int(display_breath_delay*1000))
+
     # Set up initial lighting state, if used
     if comport:
         comport.write(b'L') # Lit
 
     while True:
+        # If so configured, delay a bit to consume old image frames as quickly as possible (ideally catch back up to realtime).
+        # This can prevent image frames lagging some seconds behind reality on lower-end hardware.
+        frame_eating_delay(video_capture, frame_skip_delay)
+
         ret, image_frame = video_capture.read()
 
         if not ret:
             print("Failed grabbing image frame")
             break
-
-        if img_reverse:
-            # In the mirror, you're looking forward at you, but the webcam is flipped around 180 and looking back at you,
-            # so the image is mirrored (unless they already correct for this; unlikely).
-            image_frame = cv2.flip(image_frame, 1)
 
         image_frame = crop_cv_img(image_frame,0,1,vert_comp,1)
 
@@ -166,7 +185,7 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
         if num_faces > 0:
             # Delay a bit and capture a frame for realsies. In my initial testing no delay would catch someone just walking into frame
             # or turned side-on, this optionally gives a bit more time for them to be in position. Pretty crude, but better than nothing.
-            time.sleep(frame_grab_delay_sec)
+            frame_eating_delay(video_capture, frame_grab_delay_sec)
 
             ret, image_frame = video_capture.read()
 
@@ -200,6 +219,7 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
 
             if sd_img:
                 if image_output_path: # Save a before/after copy?
+                    # Cheesy unique filenames; we don't expect anyone to generate images faster than 100msec
                     base_filename = image_output_path + '/' + str(int(time.time()*10))
                     save_image(usable_image_frame, base_filename + '_orig.png')
                     save_image(sd_img, base_filename + '_spooky.png')
@@ -217,8 +237,15 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
 
                 # Delay to show the result
                 # Press q to quit (may take a few seconds)
-                if cv2.waitKey(int(displaytime*1000)) & 0xFF == ord('q'):
+
+
+                # Display in 2 parts. The first seems to give the rendering thread time to post/scale the image to its window properly
+                # (if too low, 'fullscreen' image is squished into the top-left corner).
+                # The second implements the bulk of the user-set delay without allowing camera frames to stack up
+                if cv2.waitKey(int(display_breath_delay*1000)) & 0xFF == ord('q'):
                     break
+
+                frame_eating_delay(video_capture, displaytime - display_breath_delay)
 
                 # Restore black screen
                 cv2.imshow("Spookified", all_black_frame)
@@ -228,7 +255,7 @@ def webcam_face_detect(video_mode, displaytime=2.0, cascasdepath="haarcascade_fr
                     comport.write(b'L')  # Lit
 
         # Press q to quit (may take a few seconds)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(int(display_breath_delay*1000)) & 0xFF == ord('q'):
             break
 
     video_capture.release()
@@ -287,9 +314,10 @@ def get_sd_image(orig_image, img_size=[512, 768]):
             # for debugging, show the actual JSON response if any
             #print(response.json())
             b64_image = response.json()['images'][0]
-        except:
+        except Exception as ex:
             # Issue talking to backend (probably timeout). The show must go on, so fail as benignly as possible and try again next time
             print("SD image retrieval failed")
+            print(traceback.format_exc())
             return None
 
         #print ("Response image payload len: %u" % len(b64_image))
